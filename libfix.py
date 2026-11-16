@@ -98,10 +98,28 @@ def key(s):
     return re.sub(r"[^a-z0-9]+", "", s)
 
 
+# Remaster notes are dropped from album names (user decision 2026-11-16):
+# "Rumours (2004 Remaster)" -> "Rumours", "(Remastered Deluxe Edition)" -> "(Deluxe Edition)".
+# Other edition text (Deluxe, Anniversary, Expanded...) is kept.
+REMASTER_WORDS = r"(?:(?:19|20)\d{2}\s+)?(?:digital(?:ly)?\s+)?remaster(?:ed)?(?:\s+(?:version|edition))?(?:\s+(?:19|20)\d{2})?"
+REMASTER_ONLY = re.compile(r"\s*[\(\[]\s*" + REMASTER_WORDS + r"\s*[\)\]]", re.I)
+REMASTER_TAIL = re.compile(r"\s+[-–]\s+" + REMASTER_WORDS + r"\s*$", re.I)
+REMASTER_IN_GROUP = re.compile(r"([\(\[][^\)\]]*?)\b" + REMASTER_WORDS + r"\b\s*([^\)\]]*[\)\]])", re.I)
+
+
+def dropRemaster(title):
+    t = REMASTER_ONLY.sub("", title or "")
+    t = REMASTER_TAIL.sub("", t)
+    t = REMASTER_IN_GROUP.sub(lambda m: (m.group(1) + m.group(2)), t)
+    t = re.sub(r"([\(\[])\s+", r"\1", t)
+    t = re.sub(r"\s+([\)\]])", r"\1", t)
+    return " ".join(t.split())
+
+
 def cleanAlbumTitle(album):
     t = YEAR_SUFFIX.sub("", album or "").strip()
     t = re.sub(r"\s+-\s+(single|ep)$", "", t, flags=re.I)
-    return t
+    return dropRemaster(t)
 
 
 def baseAlbumKey(album):
@@ -159,6 +177,7 @@ def readTags(path):
             "title": g("\xa9nam"), "artist": g("\xa9ART"), "albumArtist": g("aART"),
             "album": g("\xa9alb"), "year": g("\xa9day")[:4],
             "disc": disk[0][0] if disk else 1, "track": trkn[0][0] if trkn else 0,
+            "trackTotal": trkn[0][1] if trkn and len(trkn[0]) > 1 else 0,
         }
     t = ID3(path)
 
@@ -184,6 +203,7 @@ class MusicBrainz:
     def __init__(self):
         self.cache = json.load(open(CACHE_PATH)) if os.path.exists(CACHE_PATH) else {}
         self.last = 0.0
+        self.failed = False  # True when the last lookup gave up (busy/offline), not "no match"
 
     def save(self):
         os.makedirs(os.path.dirname(CACHE_PATH), exist_ok=True)
@@ -193,9 +213,11 @@ class MusicBrainz:
 
     def get(self, path, params):
         url = "https://musicbrainz.org/ws/2/" + path + "?" + urllib.parse.urlencode({**params, "fmt": "json"})
+        self.failed = False
         if url in self.cache:
             return self.cache[url]
-        for attempt in range(4):
+        last = ""
+        for attempt in range(7):
             wait = 1.1 - (time.time() - self.last)
             if wait > 0:
                 time.sleep(wait)
@@ -206,14 +228,20 @@ class MusicBrainz:
                 return data
             except urllib.error.HTTPError as e:
                 if e.code in (503, 429):
-                    time.sleep(3 + attempt * 3)
+                    # MusicBrainz says "too many requests": back off longer each time.
+                    last = f"busy (HTTP {e.code})"
+                    time.sleep(5 * (attempt + 1))
                     continue
                 if e.code == 404:
                     return None
                 raise
             except Exception as e:
+                last = str(e)
                 print(f"  [lookup error] MusicBrainz: {e}", file=sys.stderr)
                 time.sleep(3)
+        self.failed = True
+        print(f"  [lookup error] MusicBrainz gave up after 7 tries: {last}. "
+              "Year comes from Apple if possible; no MusicBrainz cover or credits.", file=sys.stderr)
         return None
 
     @staticmethod
@@ -369,21 +397,26 @@ def planAlbum(root, folder, mb, ov):
     albumTitle = cleanAlbumTitle(ours[0]["album"])
 
     # ---- year + per-track credits from MusicBrainz
-    rg = mb.findReleaseGroup(albumTitle, "Various Artists" if soundtrack else mainArtist, len(ours), bool(soundtrack))
+    # How big the album really is: a folder holding only track 4 (of 12) is part of an
+    # album, not a 1-song single, so don't let the lookup prefer a same-named single.
+    albumSize = max([len(ours)] + [o.get("track") or 0 for o in ours] + [o.get("trackTotal") or 0 for o in ours])
+    rg = mb.findReleaseGroup(albumTitle, "Various Artists" if soundtrack else mainArtist, albumSize, bool(soundtrack))
     # "Rumours (2004 Remaster)" isn't a MusicBrainz title: look up "Rumours" instead
     # (only for the lookup; the album name itself isn't changed here).
+    # These retries only make sense when MusicBrainz answered "no match", not when
+    # the lookup itself failed (busy/offline).
     plainTitle = EDITION.sub("", albumTitle).strip()
-    if not rg and plainTitle and plainTitle != albumTitle:
-        rg = mb.findReleaseGroup(plainTitle, "Various Artists" if soundtrack else mainArtist, len(ours), bool(soundtrack))
+    if not rg and not mb.failed and plainTitle and plainTitle != albumTitle:
+        rg = mb.findReleaseGroup(plainTitle, "Various Artists" if soundtrack else mainArtist, albumSize, bool(soundtrack))
         if rg:
             notes.append(f"found on MusicBrainz as '{plainTitle}' (edition text left out for the lookup)")
     # Album artist tagged as a combined credit ("Calvin Harris & Ellie Goulding") that
     # MusicBrainz doesn't know as one artist: try the first name. Real duos and bands
     # ("Simon & Garfunkel") are found under their full name first, so they're kept.
-    if not rg and not soundtrack and not albumOv and not collab:
+    if not rg and not mb.failed and not soundtrack and not albumOv and not collab:
         parts = splitNames(mainArtist)
         if len(parts) > 1:
-            rg = mb.findReleaseGroup(albumTitle, fix(parts[0]), len(ours), False)
+            rg = mb.findReleaseGroup(albumTitle, fix(parts[0]), albumSize, False)
             if rg:
                 notes.append(f"'{mainArtist}' isn't one artist on MusicBrainz; main artist is '{fix(parts[0])}'")
                 mainArtist = fix(parts[0])
@@ -391,7 +424,7 @@ def planAlbum(root, folder, mb, ov):
     if rg:
         year = (rg.get("first-release-date") or "")[:4] or None
         rgCredit = mb.creditNames(rg.get("artist-credit"))
-        rel = mb.bestRelease(rg["id"], len(ours))
+        rel = mb.bestRelease(rg["id"], albumSize)
         if rel:
             releaseId = rel.get("id")
             for m in rel.get("media", []):

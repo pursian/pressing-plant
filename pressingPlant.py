@@ -22,6 +22,7 @@ import os
 import shlex
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -313,12 +314,20 @@ LOOKUP_SITES = ("musicbrainz.org", "itunes.apple.com", "lrclib.net", "coverartar
 
 def unreachableSites() -> List[str]:
     """Year, lyrics, cover and genre lookups all need these. curl ships with macOS."""
-    down = []
-    for host in LOOKUP_SITES:
-        r = subprocess.run(["curl", "-s", "-o", "/dev/null", "-m", "15", "-w", "%{http_code}", f"https://{host}/"],
-                           capture_output=True, text=True)
-        if r.returncode != 0 or not r.stdout.strip() or r.stdout.strip() == "000":
-            down.append(host)
+    down = list(LOOKUP_SITES)
+    for attempt in range(3):  # a short Wi-Fi blip shouldn't stop the run
+        if attempt:
+            print(f"  can't reach {', '.join(down)}; trying again in 10 s ...")
+            time.sleep(10)
+        still = []
+        for host in down:
+            r = subprocess.run(["curl", "-s", "-o", "/dev/null", "-m", "15", "-w", "%{http_code}", f"https://{host}/"],
+                               capture_output=True, text=True)
+            if r.returncode != 0 or not r.stdout.strip() or r.stdout.strip() == "000":
+                still.append(host)
+        down = still
+        if not down:
+            break
     return down
 
 
@@ -442,6 +451,12 @@ def main() -> None:
     print(f"Converted: {converted}")
     print(f"Skipped:   {skipped}")
     print(f"Errors:    {errors}")
+
+    # Nothing new (everything was converted on an earlier run): stop here instead of
+    # running beets on an empty folder, which fails with "No matching items found".
+    if not any(config.outputDir.rglob("*.m4a")):
+        print("\nNothing new to convert. Done.")
+        return
 
     print("\n=== beets: import + lyrics + force-write (Lossless only) ===")
     runBeetsOnLossless(config)
