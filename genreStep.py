@@ -5,21 +5,26 @@ Genre step for Pressing Plant (formerly runALAC), added 2026-11-16.
 Rule: every artist in the LOSSLESS HD library has ONE genre. Freshly converted songs
 (not in Music yet) get the genre their album artist already has in the library.
 Artists the library doesn't have yet are asked about at the very end: one window
-per new artist with 1-3 suggestions (Apple Music + MusicBrainz), a list of the
-genres already in the library, and an empty box for a brand-new genre.
+per new artist with
+  * the artist name, editable: cut a combined credit ("Calvin Harris & Ellie
+    Goulding") down to the main artist, and everyone else goes into each song's
+    title as "(feat. ...)" (the album's tag rules are re-run with that artist);
+  * 1-3 genre suggestions (Apple Music + MusicBrainz) as buttons;
+  * a list of the genres already in the library, and an empty box for a new genre.
 
-Only the converted .m4a files in the work folder are written. Songs already in
-Music are never touched (their genres are the user's own picks).
+Only the converted files in the work folder are written. Songs already in Music
+are never touched (their genres are the user's own picks).
 
 Where the library's artist -> genre list comes from:
   1. Music, if it is already running with the LOSSLESS HD library open (it is never
      launched by this script, and any other library is refused);
   2. otherwise the copy saved by the last run that could read Music
      (<stateDir>/libraryGenres.json).
-Answers given in the new-artist window are remembered in
-<stateDir>/newArtistGenres.json, so the next album by that artist isn't asked again.
+Remembered between runs, in <stateDir>:
+  newArtistGenres.json  genre picked for each new artist
+  artistRenames.json    artist names edited in the window (old credit -> main artist)
 
-usage: genreStep.py <workDir> <stateDir>
+usage: genreStep.py <workDir> <stateDir> [<inputDir>]
        genreStep.py --preview      show the new-artist window with a sample; changes nothing
   GENRESTEP_AUTO=first|skip  answer new-artist windows automatically (testing only)
 """
@@ -34,11 +39,13 @@ import urllib.parse
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from libfix import fetch, key  # same web access (SSL fix) and name matching as libfix
+import libfix  # same web access (SSL fix), name matching and tag rules as the tag step
+from libfix import fetch, key, splitNames, stripFeat, addFeat
 
 from mutagen.mp4 import MP4
 
 LIBRARY_ROOT = "/Volumes/LOSSLESS HD/"
+TITLE, ARTIST, ALBUM_ARTIST, ALBUM, GENRE = "\xa9nam", "\xa9ART", "aART", "\xa9alb", "\xa9gen"
 
 READ_MUSIC_JS = r"""
 var m = Application("Music");
@@ -50,6 +57,71 @@ for (var i = 0; i < n; i++) {
 }
 JSON.stringify({tracks: n, offDrive: off, artist: t.artist(), albumArtist: t.albumArtist(), genre: t.genre()});
 """.replace("%ROOT%", LIBRARY_ROOT)
+
+# Native macOS window (AppKit via JavaScript for Automation). Replaced a Tk window on
+# 2026-11-16: the Tk 8.6.12 bundled with python.org Python ignores clicks on new macOS.
+DIALOG_JS = r"""
+ObjC.import("AppKit");
+function run(argv) {
+  var d = JSON.parse(argv[0]);
+  var app = $.NSApplication.sharedApplication;
+  app.setActivationPolicy($.NSApplicationActivationPolicyRegular);
+  var popupIndex = 0, typed = "", artist = d.artist, warn = "";
+  function label(text, x, y, w, small) {
+    // small = a short grey hint line across the whole width
+    var l = $.NSTextField.labelWithString(text);
+    l.frame = $.NSMakeRect(x, y, w, small ? 16 : 20);
+    if (small) { l.font = $.NSFont.systemFontOfSize(11); l.textColor = $.NSColor.secondaryLabelColor; }
+    return l;
+  }
+  while (true) {
+    var a = $.NSAlert.alloc.init;
+    a.messageText = "New artist: " + d.artist;
+    a.informativeText = (warn ? warn + "\n\n" : "") +
+      "Not in your library yet.\nAlbum: " + d.albums.join("; ") + "\n\n" +
+      "Check the artist name, then pick this artist's one genre: click a suggestion, " +
+      "or choose from your genres / type a new one and press “Save with the genre from the list or box”.";
+    d.suggestions.forEach(function (s) {
+      a.addButtonWithTitle("Use “" + s + "”" + (d.genres.indexOf(s) < 0 ? " (new genre)" : ""));
+    });
+    a.addButtonWithTitle("Save with the genre from the list or box");
+    a.addButtonWithTitle("Skip (change nothing)");
+
+    var v = $.NSView.alloc.initWithFrame($.NSMakeRect(0, 0, 420, 138));
+    v.addSubview(label("Artist name:", 0, 117, 130));
+    var nameBox = $.NSTextField.alloc.initWithFrame($.NSMakeRect(134, 114, 264, 24));
+    nameBox.stringValue = artist;
+    v.addSubview(nameBox);
+    v.addSubview(label("Edit to the main artist; anyone removed becomes (feat. …).", 0, 86, 420, true));
+    v.addSubview(label("Leave both names for a real joint album.", 0, 72, 420, true));
+    v.addSubview(label("One of my genres:", 0, 46, 130));
+    var pop = $.NSPopUpButton.alloc.initWithFramePullsDown($.NSMakeRect(132, 41, 268, 28), false);
+    pop.addItemWithTitle("— choose —");
+    d.genres.forEach(function (g) { pop.addItemWithTitle(g); });
+    pop.selectItemAtIndex(popupIndex);
+    v.addSubview(pop);
+    v.addSubview(label("Or a new genre:", 0, 9, 130));
+    var field = $.NSTextField.alloc.initWithFrame($.NSMakeRect(134, 6, 264, 24));
+    field.placeholderString = "type a new genre";
+    field.stringValue = typed;
+    v.addSubview(field);
+    a.accessoryView = v;
+    a.layout;
+
+    app.activateIgnoringOtherApps(true);
+    var i = a.runModal - 1000;
+    if (i > d.suggestions.length) return JSON.stringify({genre: null, artist: null});
+    artist = nameBox.stringValue.js.replace(/\s+/g, " ").trim();
+    typed = field.stringValue.js.replace(/\s+/g, " ").trim();
+    popupIndex = pop.indexOfSelectedItem;
+    if (!artist) { artist = d.artist; warn = "The artist name can't be empty."; continue; }
+    if (i < d.suggestions.length) return JSON.stringify({genre: d.suggestions[i], artist: artist});
+    if (typed) return JSON.stringify({genre: typed, artist: artist});
+    if (popupIndex > 0) return JSON.stringify({genre: d.genres[popupIndex - 1], artist: artist});
+    warn = "Choose one of your genres or type a new one first (or press Skip).";
+  }
+}
+"""
 
 # Common outside names for genres -> the library's own wording, when it has that genre.
 ALIASES = {
@@ -64,58 +136,12 @@ ALIASES = {
 }
 
 
-# Native macOS window (AppKit via JavaScript for Automation). Replaced a Tk window on
-# 2026-11-16: the Tk 8.6.12 bundled with python.org Python ignores clicks on new macOS.
-DIALOG_JS = r"""
-ObjC.import("AppKit");
-function run(argv) {
-  var d = JSON.parse(argv[0]);
-  var app = $.NSApplication.sharedApplication;
-  app.setActivationPolicy($.NSApplicationActivationPolicyRegular);
-  var popupIndex = 0, typed = "", warn = "";
-  while (true) {
-    var a = $.NSAlert.alloc.init;
-    a.messageText = "New artist: " + d.artist;
-    a.informativeText = (warn ? warn + "\n\n" : "") +
-      "Not in your library yet. Choose the one genre this artist will use.\n" +
-      "Album: " + d.albums.join("; ") + "\n\n" +
-      (d.suggestions.length ? "Click a suggestion, or choose or type a genre below."
-                            : "No suggestions found online. Choose or type a genre below.");
-    d.suggestions.forEach(function (s) {
-      a.addButtonWithTitle("Use “" + s + "”" + (d.genres.indexOf(s) < 0 ? " (new genre)" : ""));
-    });
-    a.addButtonWithTitle("Use the genre below");
-    a.addButtonWithTitle("Skip (leave as downloaded)");
+def loadJson(path):
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
 
-    var v = $.NSView.alloc.initWithFrame($.NSMakeRect(0, 0, 380, 64));
-    var l1 = $.NSTextField.labelWithString("One of my genres:");
-    l1.frame = $.NSMakeRect(0, 38, 130, 20); v.addSubview(l1);
-    var pop = $.NSPopUpButton.alloc.initWithFramePullsDown($.NSMakeRect(132, 33, 248, 28), false);
-    pop.addItemWithTitle("— choose —");
-    d.genres.forEach(function (g) { pop.addItemWithTitle(g); });
-    pop.selectItemAtIndex(popupIndex);
-    v.addSubview(pop);
-    var l2 = $.NSTextField.labelWithString("Or a new genre:");
-    l2.frame = $.NSMakeRect(0, 5, 130, 20); v.addSubview(l2);
-    var field = $.NSTextField.alloc.initWithFrame($.NSMakeRect(134, 2, 244, 24));
-    field.placeholderString = "type a new genre";
-    field.stringValue = typed;
-    v.addSubview(field);
-    a.accessoryView = v;
-    a.layout;
 
-    app.activateIgnoringOtherApps(true);
-    var i = a.runModal - 1000;
-    if (i < d.suggestions.length) return JSON.stringify({genre: d.suggestions[i]});
-    if (i > d.suggestions.length) return JSON.stringify({genre: null});
-    typed = field.stringValue.js.replace(/\s+/g, " ").trim();
-    popupIndex = pop.indexOfSelectedItem;
-    if (typed) return JSON.stringify({genre: typed});
-    if (popupIndex > 0) return JSON.stringify({genre: d.genres[popupIndex - 1]});
-    warn = "Pick one of your genres or type a new one first (or press Skip).";
-  }
-}
-"""
+def saveJson(path, data):
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
 def musicIsRunning():
@@ -123,7 +149,7 @@ def musicIsRunning():
 
 
 def readLibrary(stateDir):
-    """Return {artistKey: Counter(genre)}, {artistKey: display name}, sorted genre list."""
+    """Return {artistKey: Counter(genre)}, sorted genre list."""
     cachePath = stateDir / "libraryGenres.json"
     data = None
     if musicIsRunning():
@@ -139,7 +165,7 @@ def readLibrary(stateDir):
                         byArtist[name][g.strip()] += 1
                 data = {"readAt": time.strftime("%Y-%m-%d %H:%M"), "tracks": d["tracks"],
                         "artists": {k: dict(v) for k, v in byArtist.items()}}
-                cachePath.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+                saveJson(cachePath, data)
                 print(f"Read genres from Music: {d['tracks']} songs, {len(byArtist)} artists.")
             else:
                 print(f"Music's open library isn't LOSSLESS HD ({d['offDrive']} songs elsewhere); not using it.")
@@ -148,22 +174,17 @@ def readLibrary(stateDir):
     if data is None:
         if not cachePath.exists():
             return None
-        data = json.loads(cachePath.read_text(encoding="utf-8"))
+        data = loadJson(cachePath)
         print(f"Music not readable; using the genre list saved {data['readAt']}.")
 
-    counts, names = collections.defaultdict(collections.Counter), {}
+    counts = collections.defaultdict(collections.Counter)
     for name, genres in data["artists"].items():
-        k = key(name)
-        counts[k].update(genres)
-        names.setdefault(k, name)
-    newPath = stateDir / "newArtistGenres.json"
-    if newPath.exists():
-        for name, g in json.loads(newPath.read_text(encoding="utf-8")).items():
-            if key(name) not in counts:
-                counts[key(name)][g] += 1
-                names[key(name)] = name
+        counts[key(name)].update(genres)
+    for name, g in loadJson(stateDir / "newArtistGenres.json").items():
+        if key(name) not in counts:
+            counts[key(name)][g] += 1
     allGenres = sorted({g for c in counts.values() for g in c}, key=str.casefold)
-    return counts, names, allGenres
+    return counts, allGenres
 
 
 def suggestGenres(artist, allGenres):
@@ -175,7 +196,7 @@ def suggestGenres(artist, allGenres):
             try:
                 return json.loads(fetch(url).decode("utf-8"))
             except Exception as e:
-                busy = getattr(e, "code", None) in (429, 503)
+                busy = getattr(e, "code", None) in (429, 503) or "timed out" in str(e)
                 if busy and attempt < 3:
                     time.sleep(3 + attempt * 3)  # MusicBrainz/Apple asking us to slow down
                     continue
@@ -227,12 +248,12 @@ def suggestGenres(artist, allGenres):
 
 
 def askGenre(artist, albums, suggestions, allGenres):
-    """Window for one new artist. Returns the chosen genre, or None to leave it as is."""
+    """Window for one new artist. Returns (genre, artist name); (None, None) = skip."""
     auto = os.environ.get("GENRESTEP_AUTO")
     if auto == "skip":
-        return None
+        return None, None
     if auto == "first":
-        return suggestions[0] if suggestions else None
+        return (suggestions[0] if suggestions else None), artist
     r = subprocess.run(["osascript", "-l", "JavaScript", "-e", DIALOG_JS,
                         json.dumps({"artist": artist, "albums": albums,
                                     "suggestions": suggestions, "genres": allGenres})],
@@ -240,65 +261,132 @@ def askGenre(artist, albums, suggestions, allGenres):
     if r.returncode != 0:
         print(f"  [window failed, asking here instead] {r.stderr.strip()}")
         return askInTerminal(artist, albums, suggestions, allGenres)
-    return json.loads(r.stdout).get("genre") or None
+    d = json.loads(r.stdout)
+    return d.get("genre") or None, d.get("artist") or None
 
 
 def askInTerminal(artist, albums, suggestions, allGenres):
     print(f"\nNew artist: {artist}  ({'; '.join(albums)})")
+    name = input(f"  Artist name [{artist}]: ").strip() or artist
     for i, s in enumerate(suggestions, 1):
         print(f"  {i}. {s}")
-    print("  Or type one of your genres, or a new one. Empty = leave as downloaded.")
+    print("  Or type one of your genres, or a new one. Empty = skip.")
     print("  Your genres: " + ", ".join(allGenres))
     a = input("> ").strip()
     if a.isdigit() and 1 <= int(a) <= len(suggestions):
-        return suggestions[int(a) - 1]
-    return a or None
+        return suggestions[int(a) - 1], name
+    return (a or None), (name if a else None)
 
 
 def setGenre(paths, genre):
     for p in paths:
         f = MP4(str(p))
-        f["\xa9gen"] = [genre]
+        f[GENRE] = [genre]
         f.save()
 
 
-def preview(stateDir):
-    """Show the new-artist window with a sample artist. Changes nothing."""
-    lib = readLibrary(stateDir)
-    allGenres = lib[2] if lib else ["Alternative Rock", "Hip-Hop/Rap", "Pop"]
-    picked = askGenre("Khruangbin", ["Con Todo El Mundo [2018] (preview, nothing is changed)"],
-                      ["Alternative Rock", "Indie Rock", "Psychedelic Rock"], allGenres)
-    print(f"Preview answer: {picked!r} (not saved)")
+def renameArtist(workDir, inputDir, folders, files, newName):
+    """
+    Make newName the album artist of these albums and move everyone else credited
+    into each song's title as (feat. ...). Re-runs libfix's tag rules with newName as
+    the album artist (so year, [YYYY] and features come out like any other album);
+    if libfix still can't settle an album, just rewrites artist + feat. on its songs.
+    """
+    ov = {}
+    if os.path.exists(libfix.OVERRIDES_PATH):
+        ov = json.load(open(libfix.OVERRIDES_PATH))
+    ov.setdefault("albumArtist", {})
+    mb = libfix.MusicBrainz()
+    plans = []
+    try:
+        for folder in folders:
+            ov["albumArtist"][folder] = newName
+            plan = libfix.planAlbum(str(workDir), folder, mb, ov)
+            if plan.get("hold"):
+                print(f"  {folder}: tag rules still unsure ({'; '.join(plan['hold'])}); setting artist + feat. only")
+                fixFeatOnly([f for f in files if f.parent == workDir / folder], newName)
+            else:
+                plans.append(plan)
+    finally:
+        mb.save()
+    libfix.writeFiles(str(workDir), plans)
+    if plans and inputDir:
+        libfix.embedArtwork(str(workDir), plans, str(inputDir), mb)
 
 
-def main():
-    if len(sys.argv) >= 2 and sys.argv[1] == "--preview":
-        return preview(Path(sys.argv[2]) if len(sys.argv) > 2 else Path.home() / "Downloads" / "Lossless" / ".beetsPipeline")
-    workDir, stateDir = Path(sys.argv[1]), Path(sys.argv[2])
-    lib = readLibrary(stateDir)
-    if lib is None:
-        print("No genre list available (Music not open with LOSSLESS HD, and no saved list). "
-              "Genres left as downloaded.")
-        return
-    counts, names, allGenres = lib
+def fixFeatOnly(paths, newName):
+    for p in paths:
+        f = MP4(str(p))
+        t = f.tags
+        credited = splitNames((t.get(ARTIST) or [""])[0]) + splitNames((t.get(ALBUM_ARTIST) or [""])[0])
+        title, already = stripFeat((t.get(TITLE) or [p.stem])[0])
+        guests, seen = [], {key(newName)}
+        for n in already + credited:
+            if key(n) not in seen:
+                seen.add(key(n))
+                guests.append(n)
+        newTitle = addFeat(title, guests)
+        t[TITLE], t[ARTIST], t[ALBUM_ARTIST] = [newTitle], [newName], [newName]
+        f.save()
+        print(f"[tags set] {p.name}: {newName} | {newTitle}")
 
-    # Group converted songs by album artist.
-    byArtist = collections.defaultdict(lambda: {"name": "", "files": [], "albums": set()})
+
+def readAlbumArtists(workDir):
+    byArtist = collections.defaultdict(lambda: {"name": "", "files": [], "albums": set(), "folders": set()})
     for m4a in sorted(workDir.rglob("*.m4a")):
         tags = MP4(str(m4a)).tags or {}
-        artist = ((tags.get("aART") or tags.get("\xa9ART") or [""])[0]).strip()
+        artist = ((tags.get(ALBUM_ARTIST) or tags.get(ARTIST) or [""])[0]).strip()
         if not artist:
             print(f"  [no artist] {m4a.name}: genre left as is")
             continue
         e = byArtist[key(artist)]
         e["name"] = e["name"] or artist
         e["files"].append(m4a)
-        e["albums"].add((tags.get("\xa9alb") or [m4a.parent.name])[0])
+        e["albums"].add((tags.get(ALBUM) or [m4a.parent.name])[0])
+        e["folders"].add(str(m4a.parent.relative_to(workDir)))
+    return byArtist
+
+
+def preview(stateDir):
+    """Show the new-artist window with a sample artist. Changes nothing."""
+    lib = readLibrary(stateDir)
+    allGenres = lib[1] if lib else ["Alternative Rock", "Hip-Hop/Rap", "Pop"]
+    genre, name = askGenre("Calvin Harris & Ellie Goulding", ["Motion (preview, nothing is changed)"],
+                           ["Dance", "Electronic", "Dance Pop"], allGenres)
+    print(f"Preview answer: genre={genre!r}, artist={name!r} (not saved)")
+
+
+def main():
+    if len(sys.argv) >= 2 and sys.argv[1] == "--preview":
+        return preview(Path(sys.argv[2]) if len(sys.argv) > 2 else Path.home() / "Downloads" / "Lossless" / ".beetsPipeline")
+    workDir, stateDir = Path(sys.argv[1]), Path(sys.argv[2])
+    inputDir = Path(sys.argv[3]) if len(sys.argv) > 3 else None
+    lib = readLibrary(stateDir)
+    if lib is None:
+        print("No genre list available (Music not open with LOSSLESS HD, and no saved list). "
+              "Genres left as downloaded.")
+        return
+    counts, allGenres = lib
+    remembered = loadJson(stateDir / "newArtistGenres.json")
+    renamesPath = stateDir / "artistRenames.json"
+    renames = loadJson(renamesPath)
+
+    # Artist names edited in an earlier window: apply them again first.
+    byArtist = readAlbumArtists(workDir)
+    renamedAny = False
+    for k, e in byArtist.items():
+        target = next((new for old, new in renames.items() if key(old) == k), None)
+        if target:
+            print(f"  {e['name']} -> artist '{target}' (your earlier edit)")
+            renameArtist(workDir, inputDir, sorted(e["folders"]), e["files"], target)
+            renamedAny = True
+    if renamedAny:
+        byArtist = readAlbumArtists(workDir)
 
     newArtists, done = [], 0
     for k, e in byArtist.items():
         if k in counts:
-            genre, n = counts[k].most_common(1)[0]
+            genre = counts[k].most_common(1)[0][0]
             setGenre(e["files"], genre)
             done += len(e["files"])
             extra = ""
@@ -308,25 +396,42 @@ def main():
         else:
             newArtists.append(e)
 
-    remembered = {}
-    newPath = stateDir / "newArtistGenres.json"
-    if newPath.exists():
-        remembered = json.loads(newPath.read_text(encoding="utf-8"))
     if newArtists:
         print(f"\n=== {len(newArtists)} new artist(s): asking for a genre ===")
     for e in newArtists:
+        k = key(e["name"])
+        if k in counts:  # answered earlier in this run (e.g. a renamed album became this artist)
+            genre = counts[k].most_common(1)[0][0]
+            setGenre(e["files"], genre)
+            done += len(e["files"])
+            print(f"  {e['name']} -> {genre}: {len(e['files'])} songs (as answered above)")
+            continue
         print(f"  looking up suggestions for {e['name']} ...")
         sugg = suggestGenres(e["name"], allGenres)
-        genre = askGenre(e["name"], sorted(e["albums"]), sugg, allGenres)
+        genre, name = askGenre(e["name"], sorted(e["albums"]), sugg, allGenres)
         if not genre:
-            print(f"  {e['name']}: skipped, genre left as downloaded")
+            print(f"  {e['name']}: skipped, left as downloaded")
             continue
+        if name and key(name) != key(e["name"]):
+            print(f"  artist name edited: '{e['name']}' -> '{name}'")
+            renameArtist(workDir, inputDir, sorted(e["folders"]), e["files"], name)
+            renames[e["name"]] = name
+            saveJson(renamesPath, renames)
+            if key(name) in counts:
+                libGenre = counts[key(name)].most_common(1)[0][0]
+                if libGenre != genre:
+                    print(f"  {name} is already in your library as {libGenre}; using that (one genre per artist)")
+                genre = libGenre
+        else:
+            name = e["name"]
         setGenre(e["files"], genre)
         done += len(e["files"])
-        remembered[e["name"]] = genre
-        newPath.write_text(json.dumps(remembered, ensure_ascii=False, indent=1), encoding="utf-8")
+        if key(name) not in counts:
+            remembered[name] = genre
+            saveJson(stateDir / "newArtistGenres.json", remembered)
+            counts[key(name)][genre] += 1
         tag = "" if genre in allGenres else " (new genre)"
-        print(f"  {e['name']} -> {genre}{tag}: {len(e['files'])} songs")
+        print(f"  {name} -> {genre}{tag}: {len(e['files'])} songs")
     print(f"\nGenre set on {done} songs.")
 
 

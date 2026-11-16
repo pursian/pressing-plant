@@ -10,8 +10,9 @@ This folder holds the only live copy. Last updated 2026-11-16.
 2. Double-click **`Pressing Plant.command`**.
    - Input: `~/Soulseek Downloads/complete` if it exists, otherwise `~/Downloads/MyFolder`.
    - Output: `~/Downloads/Lossless`, all songs in one folder. Finder opens it at the end.
-3. When the run finishes, a window opens for each **new artist** (one not already in your library). Pick a genre there.
-4. Select everything in the output folder and drag it into Music.
+3. It first checks that MusicBrainz, Apple, LRCLIB and the Cover Art Archive can be reached. If not, it stops before converting anything.
+4. When the run finishes, a window opens for each **new artist** (one not already in your library). Pick a genre there.
+5. Select everything in the output folder and drag it into Music.
 
 Never point the output at the library folder (`Media.localized/Music`). Music files the songs itself.
 
@@ -29,11 +30,13 @@ Never point the output at the library folder (`Media.localized/Music`). Music fi
 - Every artist has **one** genre.
 - **Artist already in the library:** the new songs get the genre that artist already has. If the library has the artist under more than one genre, the most common one is used, and the run prints the others.
 - **New artist:** at the very end, a native macOS window shows:
-  - 1–3 suggestions from Apple Music and MusicBrainz as buttons, matched to your genre names where possible;
-  - a list of the genres you already have;
-  - an empty box for a brand-new genre (then press **Use the genre below**);
-  - **Skip**, which leaves the genre the download came with.
-- Answers are remembered in `~/Downloads/Lossless/.beetsPipeline/newArtistGenres.json`, so you're asked once per artist.
+  - **Artist name**, editable. If it's a combined credit like `Calvin Harris & Ellie Goulding`, cut it down to the main artist. The album's tag rules then run again with that artist: everyone you removed goes into each song's title as `(feat. Ellie Goulding)`, and the year and cover are looked up again. If the name you type is already in your library, that artist's library genre is used (one genre per artist).
+  - 1–3 genre suggestions from Apple Music and MusicBrainz, as buttons. Clicking one saves it.
+  - **One of my genres** (a list) and **Or a new genre** (an empty box). After using either, press **Save with the genre from the list or box**.
+  - **Skip (change nothing)** leaves the album as downloaded.
+- Edition text is also handled for lookups: `Rumours (2004 Remaster)` is looked up on MusicBrainz as `Rumours`, so the year and cover are found. The album name itself keeps the edition text.
+- Combined credits are also handled on their own: if MusicBrainz doesn't know `A & B` as one artist, the tag step tries `A`. Real duos and bands (Simon & Garfunkel) are found under their full name, so they're kept.
+- Answers are remembered in `~/Downloads/Lossless/.beetsPipeline/` (`newArtistGenres.json` for genres, `artistRenames.json` for name edits), so you're asked once per artist, and the same combined credit is fixed automatically next time.
 - Genres come from Music only if it's **already open** with the LOSSLESS HD library. The script never opens Music and refuses any other library. Otherwise it uses the list saved by the last run (`libraryGenres.json`).
 - Only the new files are changed. Genres of songs already in Music are never touched.
 - To see the window without converting anything:

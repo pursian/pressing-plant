@@ -291,18 +291,35 @@ def runGenreStep(config: pipelineConfig) -> None:
     """
     One genre per artist. Songs whose album artist is already in the LOSSLESS HD
     library get that artist's library genre; for new artists a window asks for one
-    (suggestions, your genres, or a new one). Only the new files are written.
+    (suggestions, your genres, or a new one) and lets you correct the artist name
+    (others go into the titles as feat.). Only the new files are written.
     """
+    cacheQ = shlex.quote(str(config.pipelineStateDir / "musicbrainzCache.json"))
     cmd = (
         f"source {shlex.quote(str(config.lyrFixVenvActivate))} && "
-        f"export PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1 && unset PYTHONPATH && "
+        f"export PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1 LIBFIX_CACHE={cacheQ} && unset PYTHONPATH && "
         f"python -u {shlex.quote(str(config.genreStepPath))} "
-        f"{shlex.quote(str(config.outputDir))} {shlex.quote(str(config.pipelineStateDir))}"
+        f"{shlex.quote(str(config.outputDir))} {shlex.quote(str(config.pipelineStateDir))} "
+        f"{shlex.quote(str(config.inputDir))}"
     )
     print("\n=== Genre: one genre per artist (new artists are asked at the end) ===")
     exitCode = runBash(cmd, logPath=config.beetsLogPath)
     if exitCode != 0:
         raise RuntimeError(f"genre step failed exit={exitCode}")
+
+
+LOOKUP_SITES = ("musicbrainz.org", "itunes.apple.com", "lrclib.net", "coverartarchive.org")
+
+
+def unreachableSites() -> List[str]:
+    """Year, lyrics, cover and genre lookups all need these. curl ships with macOS."""
+    down = []
+    for host in LOOKUP_SITES:
+        r = subprocess.run(["curl", "-s", "-o", "/dev/null", "-m", "15", "-w", "%{http_code}", f"https://{host}/"],
+                           capture_output=True, text=True)
+        if r.returncode != 0 or not r.stdout.strip() or r.stdout.strip() == "000":
+            down.append(host)
+    return down
 
 
 def manifestPath(config: pipelineConfig) -> Path:
@@ -409,7 +426,16 @@ def main() -> None:
 
     config.pipelineStateDir.mkdir(parents=True, exist_ok=True)
 
-    print("=== Convert FLAC -> ALAC (.m4a) into Lossless ===")
+    # Without internet every album comes out with no year, lyrics or cover and is
+    # left unchanged, so stop before converting anything.
+    print("=== Checking internet (MusicBrainz, Apple, LRCLIB, Cover Art Archive) ===")
+    down = unreachableSites()
+    if down:
+        raise SystemExit(f"Can't reach {', '.join(down)}. Check the internet connection and run again. "
+                         "Nothing was converted.")
+    print("OK")
+
+    print("\n=== Convert FLAC -> ALAC (.m4a) into Lossless ===")
     converted, skipped, errors = convertFlacs(config)
 
     print("\n=== Conversion summary ===")

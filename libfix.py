@@ -370,6 +370,23 @@ def planAlbum(root, folder, mb, ov):
 
     # ---- year + per-track credits from MusicBrainz
     rg = mb.findReleaseGroup(albumTitle, "Various Artists" if soundtrack else mainArtist, len(ours), bool(soundtrack))
+    # "Rumours (2004 Remaster)" isn't a MusicBrainz title: look up "Rumours" instead
+    # (only for the lookup; the album name itself isn't changed here).
+    plainTitle = EDITION.sub("", albumTitle).strip()
+    if not rg and plainTitle and plainTitle != albumTitle:
+        rg = mb.findReleaseGroup(plainTitle, "Various Artists" if soundtrack else mainArtist, len(ours), bool(soundtrack))
+        if rg:
+            notes.append(f"found on MusicBrainz as '{plainTitle}' (edition text left out for the lookup)")
+    # Album artist tagged as a combined credit ("Calvin Harris & Ellie Goulding") that
+    # MusicBrainz doesn't know as one artist: try the first name. Real duos and bands
+    # ("Simon & Garfunkel") are found under their full name first, so they're kept.
+    if not rg and not soundtrack and not albumOv and not collab:
+        parts = splitNames(mainArtist)
+        if len(parts) > 1:
+            rg = mb.findReleaseGroup(albumTitle, fix(parts[0]), len(ours), False)
+            if rg:
+                notes.append(f"'{mainArtist}' isn't one artist on MusicBrainz; main artist is '{fix(parts[0])}'")
+                mainArtist = fix(parts[0])
     year, mbTracks, rgCredit, releaseId = None, [], [], None
     if rg:
         year = (rg.get("first-release-date") or "")[:4] or None
