@@ -1,0 +1,10 @@
+# macOS / FAT32 clutter
+._*
+.DS_Store
+__pycache__/
+*.pyc
+# Dated backups stay on the drive only (git history replaces them going forward)
+Script Archive/
+
+# Personal fix list (folder names include Soulseek usernames). Kept on the drive only.
+overrides.json

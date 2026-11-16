@@ -1,0 +1,7 @@
+{
+  "artistSpelling": {"Inna": "INNA", "Future ": "Future"},
+  "albumArtist": {"<artist folder>/<album folder>": "Real Album Artist"},
+  "soundtracks": {"<artist folder>/<album folder>": "Fast & Furious"},
+  "collabOk": {"<artist folder>/<album folder>": true},
+  "years": {"<artist folder>/<album folder>": 1999}
+}
